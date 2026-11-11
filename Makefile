@@ -14,7 +14,7 @@ $(CONTROLLER_GEN): tools/go.mod
 	GOWORK=off go build -modfile=tools/go.mod -o $@ sigs.k8s.io/controller-tools/cmd/controller-gen
 
 build:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o bin/operator ./cmd
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o bin/operator ./cmd
 
 ## run: run against the current kubeconfig context (CRDs must be installed)
 run:
