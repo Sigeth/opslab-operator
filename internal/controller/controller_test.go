@@ -320,7 +320,9 @@ func TestInstanceDeletionRemovesNamespace(t *testing.T) {
 
 type fakeLogs string
 
-func (f fakeLogs) Logs(context.Context, string, string, string) (string, error) { return string(f), nil }
+func (f fakeLogs) Logs(context.Context, string, string, string) (string, error) {
+	return string(f), nil
+}
 
 // readyInstance returns a client with a Ready instance and a CheckRun.
 func readyInstance(t *testing.T, tasks ...string) (client.Client, types.NamespacedName) {

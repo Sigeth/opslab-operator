@@ -61,13 +61,13 @@ const (
 
 // Fixed names inside an instance namespace.
 const (
-	PackageConfigMap     = "opslab-package"
-	TargetsSecret        = "opslab-checker-targets"
-	TargetsKey           = "targets.json"
-	CheckerSA            = "opslab-checker"
-	PackageMountPath     = "/opslab/package"
-	TargetsMountPath     = "/opslab/targets"
-	machineUID     int64 = 1000
+	PackageConfigMap       = "opslab-package"
+	TargetsSecret          = "opslab-checker-targets"
+	TargetsKey             = "targets.json"
+	CheckerSA              = "opslab-checker"
+	PackageMountPath       = "/opslab/package"
+	TargetsMountPath       = "/opslab/targets"
+	machineUID       int64 = 1000
 )
 
 // InstanceNamespace is the namespace holding the resources of an instance.
