@@ -5,10 +5,79 @@ metadata:
   name: opslab-operator
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - limitranges
+  - resourcequotas
+  - secrets
+  - serviceaccounts
+  - services
+  verbs:
+  - create
+- apiGroups:
+  - ""
+  resources:
+  - namespaces
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - pods/exec
+  verbs:
+  - create
+  - get
+- apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
+  - batch
+  resources:
+  - jobs
+  verbs:
+  - create
+  - get
+  - list
+  - watch
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - networkpolicies
+  verbs:
+  - create
+- apiGroups:
   - opslab.io
   resources:
   - challengeinstances
   verbs:
+  - delete
   - get
   - list
   - patch
@@ -17,7 +86,15 @@ rules:
 - apiGroups:
   - opslab.io
   resources:
+  - challengeinstances/finalizers
+  verbs:
+  - update
+- apiGroups:
+  - opslab.io
+  resources:
   - challengeinstances/status
+  - challenges/status
+  - checkruns/status
   verbs:
   - get
   - patch
@@ -26,7 +103,21 @@ rules:
   - opslab.io
   resources:
   - challenges
+  - checkruns
+  - platformconfigs
   verbs:
   - get
   - list
   - watch
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - clusterroles
+  verbs:
+  - bind
+- apiGroups:
+  - rbac.authorization.k8s.io
+  resources:
+  - rolebindings
+  verbs:
+  - create
