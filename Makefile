@@ -1,10 +1,12 @@
+# Contract library, tested at its newest tag by contract-latest.
+CORE_GO := github.com/Sigeth/opslab-core-go
 IMG ?= ghcr.io/sigeth/opslab-operator:dev
 # podman or docker, whichever is installed.
 CONTAINER_TOOL ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
 # Tools are built outside any go.work (-modfile is not allowed in workspace mode).
 CONTROLLER_GEN := bin/controller-gen
 
-.PHONY: all build run test lint manifests verify-generated image
+.PHONY: all build run test lint manifests verify-generated image contract-latest
 
 all: manifests lint test build
 
@@ -34,3 +36,14 @@ verify-generated: manifests
 
 image:
 	$(CONTAINER_TOOL) build --platform linux/amd64 -t $(IMG) .
+
+## contract-latest: build and test against the newest opslab-core-go tag (CI),
+## on a temporary copy of go.mod so the pinned version is not changed
+contract-latest:
+	@set -e; tmp=$$(mktemp -d); trap 'rm -rf "$$tmp"' EXIT; \
+	cp go.mod go.sum "$$tmp/"; \
+	export GOWORK=off GOFLAGS="-modfile=$$tmp/go.mod"; \
+	go get $(CORE_GO)@latest; \
+	echo "== $$(go list -m $(CORE_GO))"; \
+	go build ./...; \
+	go test ./...
