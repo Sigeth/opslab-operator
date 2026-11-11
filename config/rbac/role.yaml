@@ -1,0 +1,32 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: opslab-operator
+rules:
+- apiGroups:
+  - opslab.io
+  resources:
+  - challengeinstances
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - opslab.io
+  resources:
+  - challengeinstances/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - opslab.io
+  resources:
+  - challenges
+  verbs:
+  - get
+  - list
+  - watch
