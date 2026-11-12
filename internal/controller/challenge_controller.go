@@ -59,7 +59,7 @@ func (r *ChallengeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	} else {
 		status.Package, status.Digest = pkg, digest
 		status.Mirrored = false // no registry mirror before M3
-		status.UnrunnableReason = unrunnableReason(pkg, platform)
+		status.UnrunnableReason = unrunnableReason(r.Config, pkg, platform)
 		status.Runnable = status.UnrunnableReason == ""
 		setCondition(&status.Conditions, ch.Generation, metav1.ConditionTrue, "Installed",
 			fmt.Sprintf("%s %s installed", pkg.Metadata.Name, pkg.Metadata.Version))
@@ -135,11 +135,13 @@ func mapFS(files map[string][]byte) fs.FS {
 func apiEqual(a, b any) bool { return equality.Semantic.DeepEqual(a, b) }
 
 // unrunnableReason explains why the cluster cannot run a package, or is empty.
-func unrunnableReason(pkg *v1alpha1.ChallengePackage, platform *v1alpha1.PlatformConfig) string {
+func unrunnableReason(cfg Config, pkg *v1alpha1.ChallengePackage, platform *v1alpha1.PlatformConfig) string {
 	var reasons []string
 	for _, m := range pkg.Spec.Machines {
 		switch {
-		case !supported(m.Runtime):
+		case m.Runtime == v1alpha1.RuntimeVM && !cfg.Supports(m.Runtime):
+			reasons = append(reasons, fmt.Sprintf("machine %s: the vm runtime needs KubeVirt, which is not installed", m.Name))
+		case !cfg.Supports(m.Runtime):
 			reasons = append(reasons, fmt.Sprintf("machine %s: the %s runtime is not supported yet", m.Name, m.Runtime))
 		case len(platform.Spec.AllowedRuntimes) > 0 && !slices.Contains(platform.Spec.AllowedRuntimes, m.Runtime):
 			reasons = append(reasons, fmt.Sprintf("machine %s: the %s runtime is not allowed by the platform", m.Name, m.Runtime))

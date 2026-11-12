@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -28,8 +29,9 @@ var (
 )
 
 // instanceResources builds every object of an instance namespace except the
-// namespace itself, in creation order.
-func instanceResources(cfg Config, inst *v1alpha1.ChallengeInstance, pkg *v1alpha1.ChallengePackage, files map[string][]byte) ([]client.Object, error) {
+// namespace itself, in creation order. access holds the SSH material of vm
+// machines (nil without any); its Secret comes before what depends on it.
+func instanceResources(cfg Config, inst *v1alpha1.ChallengeInstance, pkg *v1alpha1.ChallengePackage, files map[string][]byte, access *sshAccess) ([]client.Object, error) {
 	ns := InstanceNamespace(inst.Name)
 	labels := instanceLabels(inst)
 	meta := func(name string) metav1.ObjectMeta {
@@ -54,15 +56,35 @@ func instanceResources(cfg Config, inst *v1alpha1.ChallengeInstance, pkg *v1alph
 			Default:        corev1.ResourceList{corev1.ResourceCPU: checkerCPU, corev1.ResourceMemory: checkerMemory},
 			DefaultRequest: corev1.ResourceList{corev1.ResourceCPU: checkerCPU, corev1.ResourceMemory: checkerMemory},
 		}}}},
-		&networkingv1.NetworkPolicy{ObjectMeta: meta("opslab-machines"), Spec: machinesNetworkPolicy(pkg)},
+		&networkingv1.NetworkPolicy{ObjectMeta: meta("opslab-machines"), Spec: machinesNetworkPolicy(cfg, pkg)},
 		pkgFiles,
 		targets,
 		&corev1.ServiceAccount{ObjectMeta: meta(CheckerSA)},
 		roleBinding(meta(CheckerSA), cfg.CheckerExecRole, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: CheckerSA, Namespace: ns}),
 		roleBinding(meta("opslab-gateway"), cfg.GatewayExecRole, rbacv1.Subject{Kind: rbacv1.ServiceAccountKind, Name: cfg.Gateway.Name, Namespace: cfg.Gateway.Namespace}),
 	}
+	if access != nil {
+		secret, err := access.secret(ns)
+		if err != nil {
+			return nil, err
+		}
+		secret.ObjectMeta = meta(v1alpha1.SSHSecret)
+		objs = append(objs, secret)
+	}
 	for _, m := range pkg.Spec.Machines {
-		objs = append(objs, machineService(meta(m.Name), m), machinePod(meta(m.Name), m))
+		objs = append(objs, machineService(meta(m.Name), m))
+		if m.Runtime != v1alpha1.RuntimeVM {
+			objs = append(objs, machinePod(meta(m.Name), m))
+			continue
+		}
+		if access == nil {
+			return nil, fmt.Errorf("machine %s: no SSH material for a vm machine", m.Name)
+		}
+		userData, err := cloudInitSecret(meta(m.Name), m, access)
+		if err != nil {
+			return nil, err
+		}
+		objs = append(objs, userData, machineVMI(meta(m.Name), m))
 	}
 	return objs, nil
 }
@@ -92,13 +114,18 @@ func machineResources(m v1alpha1.Machine) (cpu, memory resource.Quantity) {
 	return defaultMachineCPU, defaultMachineMemory
 }
 
-// quota caps the namespace at the machines plus one running checker.
+// quota caps the namespace at the machines (with the launcher overhead of
+// VMs) plus one running checker.
 func quota(pkg *v1alpha1.ChallengePackage) corev1.ResourceQuotaSpec {
 	cpu, memory := checkerCPU.DeepCopy(), checkerMemory.DeepCopy()
 	for _, m := range pkg.Spec.Machines {
 		c, mem := machineResources(m)
 		cpu.Add(c)
 		memory.Add(mem)
+		if m.Runtime == v1alpha1.RuntimeVM {
+			cpu.Add(vmOverheadCPU)
+			memory.Add(vmOverheadMemory)
+		}
 	}
 	return corev1.ResourceQuotaSpec{Hard: corev1.ResourceList{
 		corev1.ResourcePods:                   *resource.NewQuantity(int64(len(pkg.Spec.Machines)+2), resource.DecimalSI),
@@ -113,10 +140,11 @@ func quota(pkg *v1alpha1.ChallengePackage) corev1.ResourceQuotaSpec {
 }
 
 // machinesNetworkPolicy isolates the machines: they reach each other and DNS,
-// and only the machines and the checker reach them. Internet egress, when the
+// and only the machines and the checker reach them, plus the operator over
+// SSH when there are vm machines (their setup). Internet egress, when the
 // package asks for it, excludes private ranges (the cluster and its nodes).
-// Terminals and setup go through the API server (exec), not the network.
-func machinesNetworkPolicy(pkg *v1alpha1.ChallengePackage) networkingv1.NetworkPolicySpec {
+// Terminals and pod setup go through the API server (exec), not the network.
+func machinesNetworkPolicy(cfg Config, pkg *v1alpha1.ChallengePackage) networkingv1.NetworkPolicySpec {
 	machines := metav1.LabelSelector{MatchLabels: map[string]string{LabelRole: RoleMachine}}
 	checker := metav1.LabelSelector{MatchLabels: map[string]string{LabelRole: RoleChecker}}
 	udp, tcp := corev1.ProtocolUDP, corev1.ProtocolTCP
@@ -137,6 +165,16 @@ func machinesNetworkPolicy(pkg *v1alpha1.ChallengePackage) networkingv1.NetworkP
 				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &udp, Port: &dns}, {Protocol: &tcp, Port: &dns}},
 			},
 		},
+	}
+	if hasVM(pkg) && len(cfg.OperatorPods) > 0 {
+		ssh := intstr.FromInt32(v1alpha1.SSHPort)
+		spec.Ingress = append(spec.Ingress, networkingv1.NetworkPolicyIngressRule{
+			From: []networkingv1.NetworkPolicyPeer{{
+				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": cfg.SystemNamespace}},
+				PodSelector:       &metav1.LabelSelector{MatchLabels: cfg.OperatorPods},
+			}},
+			Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &ssh}},
+		})
 	}
 	if pkg.Spec.Permissions != nil && pkg.Spec.Permissions.Egress == v1alpha1.EgressInternet {
 		spec.Egress = append(spec.Egress, networkingv1.NetworkPolicyEgressRule{
@@ -235,6 +273,18 @@ func packageConfigMap(pkg *v1alpha1.ChallengePackage, files map[string][]byte) (
 func targetsSecret(pkg *v1alpha1.ChallengePackage, ns string) (*corev1.Secret, error) {
 	targets := checkerio.Targets{Machines: map[string]checkerio.Target{}}
 	for _, m := range pkg.Spec.Machines {
+		if m.Runtime == v1alpha1.RuntimeVM {
+			targets.Machines[m.Name] = checkerio.Target{
+				Runtime:               m.Runtime,
+				Host:                  machineAddress(m.Name, ns),
+				SSHPort:               v1alpha1.SSHPort,
+				SSHUser:               v1alpha1.CheckerUser,
+				SSHPrivateKeyFile:     SSHMountPath + "/" + v1alpha1.SSHSecretCheckerKey,
+				SSHKnownHostsFile:     SSHMountPath + "/" + v1alpha1.SSHSecretKnownHosts,
+				StudentPrivateKeyFile: SSHMountPath + "/" + v1alpha1.SSHSecretStudentKey,
+			}
+			continue
+		}
 		targets.Machines[m.Name] = checkerio.Target{
 			Runtime:   m.Runtime,
 			Host:      machineAddress(m.Name, ns),
@@ -252,8 +302,9 @@ func targetsSecret(pkg *v1alpha1.ChallengePackage, ns string) (*corev1.Secret, e
 
 func machineAddress(machine, ns string) string { return machine + "." + ns + ".svc" }
 
-// checkJob runs the checker for a CheckRun.
-func checkJob(name, ns string, run *v1alpha1.CheckRun, image string, pkgFiles *corev1.ConfigMap) *batchv1.Job {
+// checkJob runs the checker for a CheckRun. With vm machines, it mounts the
+// users' SSH keys and the known hosts (not the machines' private host keys).
+func checkJob(name, ns string, run *v1alpha1.CheckRun, image string, pkgFiles *corev1.ConfigMap, vm bool) *batchv1.Job {
 	labels := map[string]string{
 		LabelManagedBy:         ManagedBy,
 		LabelCheckRun:          run.Name,
@@ -273,7 +324,7 @@ func checkJob(name, ns string, run *v1alpha1.CheckRun, image string, pkgFiles *c
 		}
 		tasks += t
 	}
-	return &batchv1.Job{
+	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels},
 		Spec: batchv1.JobSpec{
 			BackoffLimit:            new(int32(0)),
@@ -327,6 +378,20 @@ func checkJob(name, ns string, run *v1alpha1.CheckRun, image string, pkgFiles *c
 			},
 		},
 	}
+	if vm {
+		pod := &job.Spec.Template.Spec
+		pod.Volumes = append(pod.Volumes, corev1.Volume{Name: "ssh", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+			SecretName: v1alpha1.SSHSecret,
+			Items: []corev1.KeyToPath{
+				{Key: v1alpha1.SSHSecretCheckerKey, Path: v1alpha1.SSHSecretCheckerKey},
+				{Key: v1alpha1.SSHSecretStudentKey, Path: v1alpha1.SSHSecretStudentKey},
+				{Key: v1alpha1.SSHSecretKnownHosts, Path: v1alpha1.SSHSecretKnownHosts},
+			},
+		}}})
+		c := &pod.Containers[0]
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{Name: "ssh", MountPath: SSHMountPath, ReadOnly: true})
+	}
+	return job
 }
 
 func withLabels(labels map[string]string, kv ...string) map[string]string {

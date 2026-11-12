@@ -26,10 +26,21 @@ type Config struct {
 	// instance namespace to the gateway and the checker.
 	GatewayExecRole string
 	CheckerExecRole string
+	// OperatorPods selects the operator's pods in SystemNamespace: the
+	// network policy of instances with vm machines lets them in over SSH.
+	OperatorPods map[string]string
+	// Runtimes this operator can provision on this cluster (pod when empty).
+	// vm needs KubeVirt, detected at startup.
+	Runtimes []v1alpha1.Runtime
 }
 
-// SupportedRuntimes are the runtimes this operator can provision.
-var SupportedRuntimes = []v1alpha1.Runtime{v1alpha1.RuntimePod}
+// Supports reports whether instances can use a runtime.
+func (c Config) Supports(r v1alpha1.Runtime) bool {
+	if len(c.Runtimes) == 0 {
+		return r == v1alpha1.RuntimePod
+	}
+	return slices.Contains(c.Runtimes, r)
+}
 
 // Labels and annotations set by the operator.
 const (
@@ -67,6 +78,7 @@ const (
 	CheckerSA              = "opslab-checker"
 	PackageMountPath       = "/opslab/package"
 	TargetsMountPath       = "/opslab/targets"
+	SSHMountPath           = "/opslab/ssh"
 	machineUID       int64 = 1000
 )
 
@@ -91,5 +103,3 @@ func dnsName(prefix, name string) string {
 	hash := hex.EncodeToString(sum[:])[:8]
 	return prefix + name[:maxLen-len(prefix)-len(hash)-1] + "-" + hash
 }
-
-func supported(r v1alpha1.Runtime) bool { return slices.Contains(SupportedRuntimes, r) }

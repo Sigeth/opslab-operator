@@ -110,7 +110,7 @@ func (r *CheckRunReconciler) step(ctx context.Context, run *v1alpha1.CheckRun) (
 		if pkg.Spec.Validation != nil && pkg.Spec.Validation.CheckerImage != "" {
 			image = pkg.Spec.Validation.CheckerImage
 		}
-		job := checkJob(name, ns, run, image, &pkgFiles)
+		job := checkJob(name, ns, run, image, &pkgFiles, hasVM(pkg))
 		if err := r.Create(ctx, job); err != nil && !apierrors.IsAlreadyExists(err) {
 			return ctrl.Result{}, err
 		}

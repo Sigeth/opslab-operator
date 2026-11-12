@@ -14,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -24,14 +25,16 @@ import (
 
 	"github.com/Sigeth/opslab-core-go/api/v1alpha1"
 	"github.com/Sigeth/opslab-core-go/pkg/kubeexec"
+	"github.com/Sigeth/opslab-core-go/pkg/sshexec"
 )
 
 // ChallengeInstanceReconciler drives a ChallengeInstance through its
 // lifecycle: Provisioning → Ready → Expired, or Failed.
 //
 // Provisioning creates the namespace inst-<name> (quota, limits, network
-// policy, checker credentials), one Pod and headless Service per machine, then
-// runs each machine's setup scripts. Deleting the instance, or reaching its
+// policy, checker credentials), one Pod (pod runtime) or VirtualMachineInstance
+// (vm runtime) and headless Service per machine, then runs each machine's
+// setup scripts: through exec for pods, over SSH for VMs. Deleting the instance, or reaching its
 // expiry, deletes the namespace: everything in it is lost.
 //
 // Capacity admission (the Queued phase) is not implemented yet: instances are
@@ -42,8 +45,9 @@ type ChallengeInstanceReconciler struct {
 	// instance namespaces).
 	APIReader client.Reader
 	Config    Config
-	// Exec runs setup scripts in machines.
+	// Exec runs setup scripts in pod machines, SSH in vm machines.
 	Exec kubeexec.Executor
+	SSH  sshexec.Executor
 	// Now returns the current time (overridden in tests).
 	Now func() time.Time
 }
@@ -56,6 +60,8 @@ type ChallengeInstanceReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;delete;patch
 // +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create;get
 // +kubebuilder:rbac:groups="",resources=services;configmaps;secrets;serviceaccounts;resourcequotas;limitranges,verbs=create
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get
+// +kubebuilder:rbac:groups=kubevirt.io,resources=virtualmachineinstances,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=create
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles,verbs=bind
@@ -200,7 +206,18 @@ func (r *ChallengeInstanceReconciler) create(ctx context.Context, ch *v1alpha1.C
 	if err != nil {
 		return err
 	}
-	objs, err := instanceResources(r.Config, inst, pkg, files)
+	// A retried creation reuses the stored keys, so the objects it adds
+	// match the ones created before.
+	access, err := r.sshAccessOf(ctx, InstanceNamespace(inst.Name))
+	if err != nil {
+		return err
+	}
+	if access == nil {
+		if access, err = newSSHAccess(pkg); err != nil {
+			return err
+		}
+	}
+	objs, err := instanceResources(r.Config, inst, pkg, files, access)
 	if err != nil {
 		return err
 	}
@@ -224,9 +241,19 @@ func (r *ChallengeInstanceReconciler) machines(ctx context.Context, inst *v1alph
 	statuses := make([]v1alpha1.MachineStatus, 0, len(pkg.Spec.Machines))
 	var waiting []string
 	for _, m := range pkg.Spec.Machines {
-		st := v1alpha1.MachineStatus{Name: m.Name, Runtime: m.Runtime, Address: machineAddress(m.Name, ns), Pod: m.Name}
-		var pod corev1.Pod
-		err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: m.Name}, &pod)
+		st := v1alpha1.MachineStatus{Name: m.Name, Runtime: m.Runtime, Address: machineAddress(m.Name, ns)}
+		var (
+			obj  client.Object
+			pod  corev1.Pod
+			vmi  kubevirtv1.VirtualMachineInstance
+			isVM = m.Runtime == v1alpha1.RuntimeVM
+		)
+		if isVM {
+			obj = &vmi
+		} else {
+			obj, st.Pod = &pod, m.Name
+		}
+		err := r.Get(ctx, types.NamespacedName{Namespace: ns, Name: m.Name}, obj)
 		switch {
 		case apierrors.IsNotFound(err):
 			if inst.Status.Phase == v1alpha1.InstanceReady {
@@ -236,7 +263,15 @@ func (r *ChallengeInstanceReconciler) machines(ctx context.Context, inst *v1alph
 		case err != nil:
 			return false, err
 		default:
-			ready, why, err := r.machine(ctx, &pod, m, pkg)
+			var (
+				ready bool
+				why   string
+			)
+			if isVM {
+				ready, why, err = r.vmMachine(ctx, &vmi, m, pkg)
+			} else {
+				ready, why, err = r.machine(ctx, &pod, m, pkg)
+			}
 			if err != nil {
 				return false, err
 			}
@@ -299,11 +334,10 @@ func (r *ChallengeInstanceReconciler) setup(ctx context.Context, pod *corev1.Pod
 	if len(m.Setup) == 0 {
 		return nil
 	}
-	var cm corev1.ConfigMap
-	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: pod.Namespace, Name: PackageConfigMap}, &cm); err != nil {
+	files, err := r.packageFiles(ctx, pod.Namespace)
+	if err != nil {
 		return err
 	}
-	files := mapFS(configMapFiles(&cm))
 	for _, script := range m.Setup {
 		content, err := fs.ReadFile(files, script)
 		if err != nil {
@@ -327,6 +361,15 @@ func (r *ChallengeInstanceReconciler) setup(ctx context.Context, pod *corev1.Pod
 		}
 	}
 	return nil
+}
+
+// packageFiles reads the package files copied into an instance namespace.
+func (r *ChallengeInstanceReconciler) packageFiles(ctx context.Context, ns string) (fs.FS, error) {
+	var cm corev1.ConfigMap
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Namespace: ns, Name: PackageConfigMap}, &cm); err != nil {
+		return nil, err
+	}
+	return mapFS(configMapFiles(&cm)), nil
 }
 
 func configMapFiles(cm *corev1.ConfigMap) map[string][]byte {
@@ -435,10 +478,13 @@ func (r *ChallengeInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: l[LabelInstanceNamespace], Name: l[LabelInstance]}}}
 	}
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ChallengeInstance{}).
-		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(owner)).
-		WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(owner))
+	if r.Config.Supports(v1alpha1.RuntimeVM) {
+		b = b.Watches(&kubevirtv1.VirtualMachineInstance{}, handler.EnqueueRequestsFromMapFunc(owner))
+	}
+	return b.WithOptions(controller.Options{MaxConcurrentReconciles: 4}).
 		Named("challengeinstance").
 		Complete(r)
 }

@@ -14,12 +14,17 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/managedfields"
+	clientgoapplyconfigurations "k8s.io/client-go/applyconfigurations"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/structured-merge-diff/v6/typed"
 
 	"github.com/Sigeth/opslab-core-go/api/v1alpha1"
 	"github.com/Sigeth/opslab-core-go/pkg/challenge"
@@ -71,13 +76,37 @@ func newScheme(t *testing.T) *runtime.Scheme {
 	if err := v1alpha1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
+	if err := kubevirtv1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
 	return s
+}
+
+// deducedViaUnstructured deduces the schema of types without OpenAPI models
+// (KubeVirt's) from their JSON form: the default, reflection-based deduction
+// panics on their uint64 fields.
+type deducedViaUnstructured struct{ managedfields.TypeConverter }
+
+func (d deducedViaUnstructured) ObjectToTyped(obj runtime.Object, opts ...typed.ValidationOptions) (*typed.TypedValue, error) {
+	if _, ok := obj.(runtime.Unstructured); !ok {
+		u, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+		if err != nil {
+			return nil, err
+		}
+		obj = &unstructured.Unstructured{Object: u}
+	}
+	return d.TypeConverter.ObjectToTyped(obj, opts...)
 }
 
 func newClient(t *testing.T, objs ...client.Object) client.Client {
 	t.Helper()
+	builtin := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(builtin); err != nil {
+		t.Fatal(err)
+	}
 	return fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(objs...).
-		WithStatusSubresource(&v1alpha1.Challenge{}, &v1alpha1.ChallengeInstance{}, &v1alpha1.CheckRun{}, &corev1.Pod{}, &batchv1.Job{}).Build()
+		WithTypeConverters(clientgoapplyconfigurations.NewTypeConverter(builtin), deducedViaUnstructured{managedfields.NewDeducedTypeConverter()}).
+		WithStatusSubresource(&v1alpha1.Challenge{}, &v1alpha1.ChallengeInstance{}, &v1alpha1.CheckRun{}, &corev1.Pod{}, &batchv1.Job{}, &kubevirtv1.VirtualMachineInstance{}).Build()
 }
 
 func inlineChallenge(t *testing.T, manifest string) (*v1alpha1.Challenge, *corev1.ConfigMap) {
