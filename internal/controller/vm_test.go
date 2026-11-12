@@ -45,6 +45,7 @@ var vmConfig = func() Config {
 	cfg := testConfig
 	cfg.Runtimes = []v1alpha1.Runtime{v1alpha1.RuntimePod, v1alpha1.RuntimeVM}
 	cfg.OperatorPods = map[string]string{"app.kubernetes.io/name": "operator"}
+	cfg.GatewayPods = map[string]string{"app.kubernetes.io/name": "gateway"}
 	return cfg
 }()
 
@@ -174,10 +175,12 @@ func TestVMInstanceResources(t *testing.T) {
 		t.Fatalf("memory quota = %s, want %s", got.String(), want.String())
 	}
 	policy := get(t, c, types.NamespacedName{Namespace: ns, Name: "opslab-machines"}, &networkingv1.NetworkPolicy{})
-	operatorRule := policy.Spec.Ingress[len(policy.Spec.Ingress)-1]
-	if operatorRule.Ports[0].Port.IntVal != v1alpha1.SSHPort || operatorRule.From[0].PodSelector.MatchLabels["app.kubernetes.io/name"] != "operator" ||
-		operatorRule.From[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != systemNS {
-		t.Fatalf("operator ingress = %+v", operatorRule)
+	sshRule := policy.Spec.Ingress[len(policy.Spec.Ingress)-1]
+	if sshRule.Ports[0].Port.IntVal != v1alpha1.SSHPort || len(sshRule.From) != 2 ||
+		sshRule.From[0].PodSelector.MatchLabels["app.kubernetes.io/name"] != "operator" ||
+		sshRule.From[1].PodSelector.MatchLabels["app.kubernetes.io/name"] != "gateway" ||
+		sshRule.From[1].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != testConfig.Gateway.Namespace {
+		t.Fatalf("SSH ingress = %+v", sshRule)
 	}
 
 	// The checker reaches the machine over SSH.

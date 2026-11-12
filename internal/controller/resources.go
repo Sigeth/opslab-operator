@@ -140,8 +140,8 @@ func quota(pkg *v1alpha1.ChallengePackage) corev1.ResourceQuotaSpec {
 }
 
 // machinesNetworkPolicy isolates the machines: they reach each other and DNS,
-// and only the machines and the checker reach them, plus the operator over
-// SSH when there are vm machines (their setup). Internet egress, when the
+// and only the machines and the checker reach them, plus the operator (setup)
+// and the gateway (terminals) over SSH when there are vm machines. Internet egress, when the
 // package asks for it, excludes private ranges (the cluster and its nodes).
 // Terminals and pod setup go through the API server (exec), not the network.
 func machinesNetworkPolicy(cfg Config, pkg *v1alpha1.ChallengePackage) networkingv1.NetworkPolicySpec {
@@ -166,15 +166,26 @@ func machinesNetworkPolicy(cfg Config, pkg *v1alpha1.ChallengePackage) networkin
 			},
 		},
 	}
-	if hasVM(pkg) && len(cfg.OperatorPods) > 0 {
-		ssh := intstr.FromInt32(v1alpha1.SSHPort)
-		spec.Ingress = append(spec.Ingress, networkingv1.NetworkPolicyIngressRule{
-			From: []networkingv1.NetworkPolicyPeer{{
-				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": cfg.SystemNamespace}},
-				PodSelector:       &metav1.LabelSelector{MatchLabels: cfg.OperatorPods},
-			}},
-			Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &ssh}},
-		})
+	if hasVM(pkg) {
+		var peers []networkingv1.NetworkPolicyPeer
+		for _, p := range []struct {
+			namespace string
+			pods      map[string]string
+		}{{cfg.SystemNamespace, cfg.OperatorPods}, {cfg.Gateway.Namespace, cfg.GatewayPods}} {
+			if len(p.pods) > 0 {
+				peers = append(peers, networkingv1.NetworkPolicyPeer{
+					NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": p.namespace}},
+					PodSelector:       &metav1.LabelSelector{MatchLabels: p.pods},
+				})
+			}
+		}
+		if len(peers) > 0 {
+			ssh := intstr.FromInt32(v1alpha1.SSHPort)
+			spec.Ingress = append(spec.Ingress, networkingv1.NetworkPolicyIngressRule{
+				From:  peers,
+				Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &ssh}},
+			})
+		}
 	}
 	if pkg.Spec.Permissions != nil && pkg.Spec.Permissions.Egress == v1alpha1.EgressInternet {
 		spec.Egress = append(spec.Egress, networkingv1.NetworkPolicyEgressRule{

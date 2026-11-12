@@ -41,6 +41,7 @@ func main() {
 		leaderElect  bool
 		gateway      string
 		operatorPods string
+		gatewayPods  string
 		cfg          controller.Config
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address of the metrics endpoint; 0 disables it.")
@@ -52,6 +53,7 @@ func main() {
 	flag.StringVar(&cfg.GatewayExecRole, "gateway-exec-role", project.Name+"-gateway-exec", "ClusterRole bound to the gateway in instance namespaces.")
 	flag.StringVar(&cfg.CheckerExecRole, "checker-exec-role", project.Name+"-checker-exec", "ClusterRole bound to the checker in instance namespaces.")
 	flag.StringVar(&operatorPods, "operator-pod-labels", "app.kubernetes.io/name=operator", "Labels of the operator's pods (k=v,...), allowed to reach vm machines over SSH.")
+	flag.StringVar(&gatewayPods, "gateway-pod-labels", "app.kubernetes.io/name=gateway", "Labels of the gateway's pods (k=v,...), allowed to reach vm machines over SSH.")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -70,6 +72,9 @@ func main() {
 	pods, err := labels.ConvertSelectorToLabelsMap(operatorPods)
 	must(err, "reading --operator-pod-labels")
 	cfg.OperatorPods = pods
+	if cfg.GatewayPods, err = labels.ConvertSelectorToLabelsMap(gatewayPods); err != nil {
+		must(err, "reading --gateway-pod-labels")
+	}
 
 	scheme := runtime.NewScheme()
 	must(clientgoscheme.AddToScheme(scheme), "registering Kubernetes types")

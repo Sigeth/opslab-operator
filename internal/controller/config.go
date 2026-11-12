@@ -29,6 +29,9 @@ type Config struct {
 	// OperatorPods selects the operator's pods in SystemNamespace: the
 	// network policy of instances with vm machines lets them in over SSH.
 	OperatorPods map[string]string
+	// GatewayPods selects the gateway's pods in Gateway.Namespace, let into
+	// vm machines over SSH (terminals).
+	GatewayPods map[string]string
 	// Runtimes this operator can provision on this cluster (pod when empty).
 	// vm needs KubeVirt, detected at startup.
 	Runtimes []v1alpha1.Runtime
