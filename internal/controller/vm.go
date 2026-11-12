@@ -148,7 +148,9 @@ func cloudInitUserData(m v1alpha1.Machine, a *sshAccess) ([]byte, error) {
 		"disable_root":      true,
 		"ssh_pwauth":        false,
 		"ssh_deletekeys":    true,
-		"ssh_genkeytypes":   []string{},
+		// Only the pinned key below: nothing else is generated (the schema
+		// refuses an empty list).
+		"ssh_genkeytypes": []string{"ed25519"},
 		"ssh_keys": map[string]string{
 			"ed25519_private": string(host.Private),
 			"ed25519_public":  host.Public,
