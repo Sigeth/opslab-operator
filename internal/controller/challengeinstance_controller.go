@@ -305,8 +305,8 @@ func (r *ChallengeInstanceReconciler) machine(ctx context.Context, pod *corev1.P
 	case cs == nil:
 		return false, "scheduling", nil
 	case cs.State.Waiting != nil:
-		if bad := cs.State.Waiting.Reason; bad == "ErrImagePull" || bad == "ImagePullBackOff" || bad == "InvalidImageName" || bad == "CreateContainerConfigError" {
-			return false, fmt.Sprintf("%s: %s", bad, cs.State.Waiting.Message), nil
+		if problem := waitingProblem(*cs); problem != "" {
+			return false, problem, nil
 		}
 		return false, "starting", nil
 	case cs.State.Running == nil || !cs.Ready:
@@ -327,6 +327,19 @@ func (r *ChallengeInstanceReconciler) machine(ctx context.Context, pod *corev1.P
 		return false, "", err
 	}
 	return true, "", nil
+}
+
+// waitingProblem explains a container that cannot start (image, config...),
+// or is empty when it is only starting.
+func waitingProblem(cs corev1.ContainerStatus) string {
+	if cs.State.Waiting == nil {
+		return ""
+	}
+	switch reason := cs.State.Waiting.Reason; reason {
+	case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError":
+		return fmt.Sprintf("%s: %s", reason, cs.State.Waiting.Message)
+	}
+	return ""
 }
 
 // setup runs the machine's setup scripts in order, as the container user.

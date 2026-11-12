@@ -247,9 +247,14 @@ func (r *ChallengeInstanceReconciler) vmMachine(ctx context.Context, vmi *kubevi
 	case kubevirtv1.Failed, kubevirtv1.Succeeded:
 		return false, "", &fatalError{fmt.Sprintf("machine %s stopped (%s)", m.Name, vmi.Status.Phase)}
 	case kubevirtv1.Running:
-	case kubevirtv1.Scheduled:
-		return false, "starting", nil
 	default:
+		// The launcher pod knows why the VM does not start (disk image...).
+		if problem := r.launcherProblem(ctx, vmi, m); problem != "" {
+			return false, problem, nil
+		}
+		if vmi.Status.Phase == kubevirtv1.Scheduled {
+			return false, "starting", nil
+		}
 		return false, vmiWaiting(vmi), nil
 	}
 	if done, ok := vmi.Annotations[AnnotationSetupDone]; ok && done == string(vmi.UID) {
@@ -327,6 +332,24 @@ func (r *ChallengeInstanceReconciler) vmMachine(ctx context.Context, vmi *kubevi
 		return false, "", err
 	}
 	return true, "", nil
+}
+
+// launcherProblem reports a container of the VM's launcher pod that cannot
+// start. The pod carries the VMI's labels.
+func (r *ChallengeInstanceReconciler) launcherProblem(ctx context.Context, vmi *kubevirtv1.VirtualMachineInstance, m v1alpha1.Machine) string {
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods, client.InNamespace(vmi.Namespace),
+		client.MatchingLabels{LabelMachine: m.Name, LabelRole: RoleMachine}); err != nil {
+		return ""
+	}
+	for _, pod := range pods.Items {
+		for _, cs := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
+			if problem := waitingProblem(cs); problem != "" {
+				return problem
+			}
+		}
+	}
+	return ""
 }
 
 // cloudInitStatus extracts the status from `cloud-init status` ("done",

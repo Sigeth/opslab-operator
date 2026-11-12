@@ -219,6 +219,24 @@ func TestVMInstanceLifecycle(t *testing.T) {
 		t.Fatalf("message = %q", msg)
 	}
 
+	// The launcher pod cannot mount the disk image: the status says so.
+	launcher := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "virt-launcher-server-x", Namespace: ns,
+			Labels: map[string]string{LabelMachine: "box", LabelRole: RoleMachine, LabelInstance: key.Name}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{Name: "compute",
+			State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerError", Message: "failed to mount image volume"}}}}},
+	}
+	if err := c.Create(context.Background(), launcher); err != nil {
+		t.Fatal(err)
+	}
+	doReconcile(t, r, key)
+	if msg := machineMessage(t, c, key); msg != "box: CreateContainerError: failed to mount image volume" {
+		t.Fatalf("message = %q", msg)
+	}
+	if err := c.Delete(context.Background(), launcher); err != nil {
+		t.Fatal(err)
+	}
+
 	// Running but not reachable yet.
 	setVMIPhase(t, c, ns, "box", kubevirtv1.Running)
 	doReconcile(t, r, key)
