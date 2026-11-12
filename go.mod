@@ -3,7 +3,7 @@ module github.com/Sigeth/opslab-operator
 go 1.27.0
 
 require (
-	github.com/Sigeth/opslab-core-go v0.3.0
+	github.com/Sigeth/opslab-core-go v0.4.0
 	k8s.io/api v0.37.2
 	k8s.io/apimachinery v0.37.2
 	k8s.io/client-go v0.37.2
