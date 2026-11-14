@@ -202,7 +202,7 @@ func expiry(inst *v1alpha1.ChallengeInstance, pkg *v1alpha1.ChallengePackage, pl
 // create creates the namespace and everything in it. Existing objects are
 // kept: instance resources never change after creation.
 func (r *ChallengeInstanceReconciler) create(ctx context.Context, ch *v1alpha1.Challenge, pkg *v1alpha1.ChallengePackage, inst *v1alpha1.ChallengeInstance) error {
-	files, err := inlineFiles(ctx, r.Client, r.Config.SystemNamespace, ch.Spec.Source.Inline)
+	files, err := installedFiles(ctx, r.Client, r.Config.SystemNamespace, ch)
 	if err != nil {
 		return err
 	}

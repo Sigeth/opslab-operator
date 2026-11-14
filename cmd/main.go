@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -29,6 +30,7 @@ import (
 
 	"github.com/Sigeth/opslab-core-go/api/v1alpha1"
 	"github.com/Sigeth/opslab-core-go/pkg/kubeexec"
+	"github.com/Sigeth/opslab-core-go/pkg/ocipkg"
 	"github.com/Sigeth/opslab-core-go/pkg/project"
 	"github.com/Sigeth/opslab-core-go/pkg/sshexec"
 	"github.com/Sigeth/opslab-operator/internal/controller"
@@ -42,6 +44,7 @@ func main() {
 		gateway      string
 		operatorPods string
 		gatewayPods  string
+		plainHTTP    string
 		cfg          controller.Config
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "Address of the metrics endpoint; 0 disables it.")
@@ -54,6 +57,7 @@ func main() {
 	flag.StringVar(&cfg.CheckerExecRole, "checker-exec-role", project.Name+"-checker-exec", "ClusterRole bound to the checker in instance namespaces.")
 	flag.StringVar(&operatorPods, "operator-pod-labels", "app.kubernetes.io/name=operator", "Labels of the operator's pods (k=v,...), allowed to reach vm machines over SSH.")
 	flag.StringVar(&gatewayPods, "gateway-pod-labels", "app.kubernetes.io/name=gateway", "Labels of the gateway's pods (k=v,...), allowed to reach vm machines over SSH.")
+	flag.StringVar(&plainHTTP, "plain-http-registries", "", "Registries reached over plain HTTP (host:port,...), for local test registries only.")
 	opts := zap.Options{}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -103,7 +107,11 @@ func main() {
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	must(err, "creating the Kubernetes client")
 
-	must((&controller.ChallengeReconciler{Client: mgr.GetClient(), Config: cfg}).SetupWithManager(mgr), "setting up Challenge controller")
+	plainHTTPRegistries := strings.Split(plainHTTP, ",")
+	registry := controller.RemoteRegistry{Remote: ocipkg.Remote{
+		PlainHTTP: func(host string) bool { return host != "" && slices.Contains(plainHTTPRegistries, host) },
+	}}
+	must((&controller.ChallengeReconciler{Client: mgr.GetClient(), Config: cfg, Registry: registry}).SetupWithManager(mgr), "setting up Challenge controller")
 	must((&controller.ChallengeInstanceReconciler{
 		Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg, Exec: exec, SSH: sshexec.New(),
 	}).SetupWithManager(mgr), "setting up ChallengeInstance controller")

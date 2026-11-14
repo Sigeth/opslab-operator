@@ -2,11 +2,13 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"slices"
 	"strings"
 	"testing/fstest"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -25,13 +27,18 @@ import (
 )
 
 // ChallengeReconciler installs challenges: it resolves and validates the
-// package, and reports whether this cluster can run it.
-//
-// M1 supports inline packages (local development) only.
+// package, stores its files and reports whether this cluster can run it.
+// Inline (local development) and OCI sources are supported.
 type ChallengeReconciler struct {
 	client.Client
 	Config Config
+	// Registry reads OCI packages. Nil refuses OCI sources.
+	Registry PackageRegistry
 }
+
+// fetchRetry is how long the operator waits before fetching a package again
+// after a registry failure.
+const fetchRetry = time.Minute
 
 // +kubebuilder:rbac:groups=opslab.io,resources=challenges,verbs=get;list;watch
 // +kubebuilder:rbac:groups=opslab.io,resources=challenges/status,verbs=get;update;patch
@@ -51,14 +58,20 @@ func (r *ChallengeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	status := ch.Status.DeepCopy()
 	status.ObservedGeneration = ch.Generation
-	pkg, digest, resolveErr := r.resolve(ctx, &ch)
+	result := ctrl.Result{}
+	inst, resolveErr := r.resolve(ctx, &ch)
 	if resolveErr != nil {
-		status.Package, status.Digest, status.Runnable = nil, "", false
+		status.Package, status.Digest, status.Signer, status.FilesConfigMap, status.Runnable = nil, "", "", "", false
 		status.UnrunnableReason = ""
-		setCondition(&status.Conditions, ch.Generation, metav1.ConditionFalse, "Invalid", resolveErr.Error())
+		reason := "Invalid"
+		if errors.As(resolveErr, new(fetchError)) {
+			reason, result.RequeueAfter = "FetchFailed", fetchRetry
+		}
+		setCondition(&status.Conditions, ch.Generation, metav1.ConditionFalse, reason, resolveErr.Error())
 	} else {
-		status.Package, status.Digest = pkg, digest
-		status.Mirrored = false // no registry mirror before M3
+		pkg := inst.pkg
+		status.Package, status.Digest, status.Signer, status.FilesConfigMap = pkg, inst.digest, inst.signer, inst.filesConfigMap
+		status.Mirrored = false // the registry mirror comes later in M3 (D39)
 		status.UnrunnableReason = unrunnableReason(r.Config, pkg, platform)
 		status.Runnable = status.UnrunnableReason == ""
 		setCondition(&status.Conditions, ch.Generation, metav1.ConditionTrue, "Installed",
@@ -66,7 +79,7 @@ func (r *ChallengeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if apiEqual(&ch.Status, status) {
-		return ctrl.Result{}, nil
+		return result, nil
 	}
 	ch.Status = *status
 	if err := r.Status().Update(ctx, &ch); err != nil {
@@ -76,32 +89,43 @@ func (r *ChallengeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 	log.FromContext(ctx).Info("challenge reconciled", "installed", resolveErr == nil, "runnable", status.Runnable)
-	return ctrl.Result{}, nil
+	return result, nil
 }
 
-// resolve returns the validated and defaulted package with its digest.
-func (r *ChallengeReconciler) resolve(ctx context.Context, ch *v1alpha1.Challenge) (*v1alpha1.ChallengePackage, string, error) {
+// resolve returns the validated and defaulted package, with its digest and
+// the ConfigMap holding its files.
+func (r *ChallengeReconciler) resolve(ctx context.Context, ch *v1alpha1.Challenge) (*resolvedPackage, error) {
 	src := ch.Spec.Source
-	if src.Inline == nil {
-		return nil, "", fmt.Errorf("only inline packages are supported by this operator version (catalog and OCI sources come with the marketplace)")
+	switch {
+	case src.Inline != nil:
+		return r.resolveInline(ctx, ch)
+	case src.OCI != nil:
+		return r.resolveOCI(ctx, ch)
+	default:
+		return nil, errors.New("catalog sources are not supported by this operator version")
 	}
-	pkg := src.Inline.Package.DeepCopy()
-	bundle, err := inlineFiles(ctx, r.Client, r.Config.SystemNamespace, src.Inline)
+}
+
+// resolveInline installs an inline package (local development).
+func (r *ChallengeReconciler) resolveInline(ctx context.Context, ch *v1alpha1.Challenge) (*resolvedPackage, error) {
+	inline := ch.Spec.Source.Inline
+	pkg := inline.Package.DeepCopy()
+	bundle, err := inlineFiles(ctx, r.Client, r.Config.SystemNamespace, inline)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if errs := challenge.Validate(pkg, mapFS(bundle)); len(errs) > 0 {
-		return nil, "", fmt.Errorf("invalid package: %v", errs.ToAggregate())
+		return nil, fmt.Errorf("invalid package: %v", errs.ToAggregate())
 	}
 	if pkg.Metadata.Name != ch.Name {
-		return nil, "", fmt.Errorf("the Challenge must be named after its package %q", pkg.Metadata.Name)
+		return nil, fmt.Errorf("the Challenge must be named after its package %q", pkg.Metadata.Name)
 	}
 	digest, err := challenge.Digest(pkg, bundle)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	challenge.SetDefaults(pkg)
-	return pkg, digest, nil
+	return &resolvedPackage{pkg: pkg, digest: digest, filesConfigMap: inline.FilesConfigMap}, nil
 }
 
 // inlineFiles reads the files of an inline package from its ConfigMap.
@@ -211,6 +235,7 @@ func (r *ChallengeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.Challenge{}).
+		Owns(&corev1.ConfigMap{}).
 		Watches(&v1alpha1.PlatformConfig{}, handler.EnqueueRequestsFromMapFunc(all)).
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(usingConfigMap)).
 		Named("challenge").

@@ -52,6 +52,7 @@ const (
 	LabelInstance          = project.LabelPrefix + "instance"
 	LabelInstanceNamespace = project.LabelPrefix + "instance-namespace"
 	LabelMachine           = project.LabelPrefix + "machine"
+	LabelChallenge         = project.LabelPrefix + "challenge"
 	LabelRole              = project.LabelPrefix + "role"
 	LabelCheckRun          = project.LabelPrefix + "checkrun"
 	RoleMachine            = "machine"
